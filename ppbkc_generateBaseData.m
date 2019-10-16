@@ -1,7 +1,7 @@
-function machine = ppbkc_generateBaseData(name)
+function machine = ppbkc_generateBaseData(name,inputDir)
 
 %% read parameter file
-fileHandle = fopen('params.dat');
+fileHandle = fopen([inputDir filesep 'params.dat']);
 tmp = textscan(fileHandle,'%s %f','CommentStyle',{'#'});
 fclose(fileHandle);
 
@@ -22,21 +22,54 @@ machine.meta.SCD           = params('source_collimator_distance');
 %% write data
 machine.data.energy         = params('photon_energy');
 machine.data.kernelPos      = [0:0.5:179.5];
+machine.data.fwhm           = params('fwhm_gauss');
+machine.data.iNumKernel     = params('i_num_kernel');
+machine.data.electronRangeIntensity     = params('electron_range_intensity');
 
 %% load primary fluence
-fileHandle = fopen('primflu.dat');
+fileHandle = fopen([inputDir filesep 'primflu.dat']);
 machine.data.primaryFluence = cell2mat(textscan(fileHandle,'%f %f','CommentStyle',{'#'}));
 fclose(fileHandle);
 
 %% compute attenuation coefficent
 % load tpr
-fileHandle = fopen('tpr.dat');
-tprTmp = cell2mat(textscan(fileHandle,'%f %f %f %f %f %f %f %f %f %f %f %f %f %f','CommentStyle',{'#'}));
+tprTmp = [];
+fileHandle = fopen([inputDir filesep 'tpr.dat']);
+while ~feof(fileHandle)
+    currLine = fgetl(fileHandle);
+    if currLine(1) ~= '#'
+        % fprintf([currLine '\n']);
+        tprTmp = [tprTmp; str2num(currLine)];
+    end
+end
 fclose(fileHandle);
 
+% check if field size 0 included, if not interpolate
+if tprTmp(1,2) ~= 0
+    
+    % interpolate
+    tprZero = NaN*ones(size(tprTmp,1)-1,1);
+    for i = 1:numel(tprZero)
+        tprZero(i) = interp1(tprTmp(1,2:end),tprTmp(i+1,2:end),0,'linear','extrap');        
+    end
+
+    % insert
+    tprTmp = [tprTmp(:,1) [0;tprZero] tprTmp(:,2:end)];
+    
+end
+
+% refactor into field size, depths and tpr values
 tprFieldSizes = tprTmp(1,2:end);
 tprDepths     = tprTmp(2:end,1);
 tpr           = tprTmp(2:end,2:end);
+
+machine.data.surfaceDose = tpr(1,1);
+
+% uncomment for debug plot
+% semilogx(tprDepths,tpr)
+% legend(arrayfun(@(n) ['field size = ' num2str(n)],tprFieldSizes,'Uni',0))
+% xlabel('[mm]')
+% ylabel('rel. dose')
 
 % find max positions
 [tprMax,tprMaxIx] = max(tpr);
@@ -54,7 +87,7 @@ ftmp = -log(tpr_0(ix+1:end));
 fSy  = sum(ftmp);
 fSxy = sum(ftmp.*tprDepths(ix+1:end));
 
-% mu = 0.005066; % reference value from literature
+% machine.data.m = 0.005066; % reference value for 6MV from literature
 machine.data.m = ( fSxy - ( (fSx*fSy) / length(tpr_0(ix+1:end)) ) ) / ...
                  ( fSxx - ( (fSx^2)   / length(tpr_0(ix+1:end)) ) );
 
@@ -63,9 +96,9 @@ maxPos_fun = @(x) (log(machine.data.m)-log(x))/(machine.data.m-x);
 
 options = optimoptions('fmincon','Display','off');
 
-machine.data.beta(1) = fmincon(@(x) (maxPos_fun(x) - meanMaxPos_mm).^2,1,[],[],[],[],0,1000,[],options);
-machine.data.beta(2) = fmincon(@(x) (maxPos_fun(x) - (meanMaxPos_mm+1/machine.data.m)/2).^2,1,[],[],[],[],0,1000,[],options);
-machine.data.beta(3) = fmincon(@(x) (maxPos_fun(x) - 1/machine.data.m).^2,1,[],[],[],[],0,1000,[],options);
+machine.data.betas(1) = fmincon(@(x) (maxPos_fun(x) - meanMaxPos_mm).^2,1,[],[],[],[],0,1000,[],options);
+machine.data.betas(2) = fmincon(@(x) (maxPos_fun(x) - (meanMaxPos_mm+1/machine.data.m)/2).^2,1,[],[],[],[],0,1000,[],options);
+machine.data.betas(3) = fmincon(@(x) (maxPos_fun(x) - 1/machine.data.m).^2,1,[],[],[],[],0,1000,[],options);
 
 %% compute normalization for kernel
 kernelExtension  = 720; % pixel
@@ -74,7 +107,7 @@ kernelNorm       = ppbkc_calcKernelNorm(kernelExtension,kernelResolution,machine
 
 %% output factor
 % read data
-fileHandle = fopen('of.dat');
+fileHandle = fopen([inputDir filesep 'of.dat']);
 outputFactor = cell2mat(textscan(fileHandle,'%f %f','CommentStyle',{'#'}));
 fclose(fileHandle);
 
@@ -108,12 +141,12 @@ for i = 1:501
                   'spline');
               
     % compute weights of depth dose components 
-    D_1 = (machine.data.beta(1)/(machine.data.beta(1)-machine.data.m)) * ...
-        (exp(-machine.data.m*tprDepths(ix+1:end))-exp(-machine.data.beta(1)*tprDepths(ix+1:end)));
-    D_2 = (machine.data.beta(2)/(machine.data.beta(2)-machine.data.m)) * ...
-        (exp(-machine.data.m*tprDepths(ix+1:end))-exp(-machine.data.beta(2)*tprDepths(ix+1:end)));
-    D_3 = (machine.data.beta(3)/(machine.data.beta(3)-machine.data.m)) * ...
-        (exp(-machine.data.m*tprDepths(ix+1:end))-exp(-machine.data.beta(3)*tprDepths(ix+1:end)));
+    D_1 = (machine.data.betas(1)/(machine.data.betas(1)-machine.data.m)) * ...
+        (exp(-machine.data.m*tprDepths(ix+1:end))-exp(-machine.data.betas(1)*tprDepths(ix+1:end)));
+    D_2 = (machine.data.betas(2)/(machine.data.betas(2)-machine.data.m)) * ...
+        (exp(-machine.data.m*tprDepths(ix+1:end))-exp(-machine.data.betas(2)*tprDepths(ix+1:end)));
+    D_3 = (machine.data.betas(3)/(machine.data.betas(3)-machine.data.m)) * ...
+        (exp(-machine.data.m*tprDepths(ix+1:end))-exp(-machine.data.betas(3)*tprDepths(ix+1:end)));
 
     mx1 = [D_1 D_2 D_3]'*[D_1 D_2 D_3];
     mx2 = [D_1 D_2 D_3]'*scaledTpr(ix+1:end,:);
@@ -123,7 +156,7 @@ for i = 1:501
     D_1_spline = interp1(tprFieldSizes,W_ri(:,1),equivalentFieldSizes, 'spline');
     D_2_spline = interp1(tprFieldSizes,W_ri(:,2),equivalentFieldSizes, 'spline');
     D_3_spline = interp1(tprFieldSizes,W_ri(:,3),equivalentFieldSizes, 'spline');
-
+    
 
     fGradFitPar_1 = [correctedOutputFactorAtEquiFieldSizes(1)*D_1_spline(1), ...
                      diff(correctedOutputFactorAtEquiFieldSizes.*D_1_spline)];
@@ -135,5 +168,16 @@ for i = 1:501
     machine.data.kernel(i).kernel1 = fGradFitPar_1' ./ kernelNorm;
     machine.data.kernel(i).kernel2 = fGradFitPar_2' ./ kernelNorm;
     machine.data.kernel(i).kernel3 = fGradFitPar_3' ./ kernelNorm;
-
+    
+    if machine.data.iNumKernel == 4
+        W_ri(:,4) = tpr(1,:)./tpr(1,1);
+        D_4_spline = interp1(tprFieldSizes,W_ri(:,4),equivalentFieldSizes, 'spline');
+        fGradFitPar_4 = [correctedOutputFactorAtEquiFieldSizes(1)*D_4_spline(1), ...
+                         diff(correctedOutputFactorAtEquiFieldSizes.*D_4_spline)];
+        machine.data.kernel(i).kernel4 = fGradFitPar_4' ./ kernelNorm;        
+    end
+    
 end
+
+% save file
+save(strcat('photons_',name),'machine');
